@@ -226,31 +226,32 @@ async def show_main_menu(target: Message | CallbackQuery, edit: bool = False):
     user_id = target.from_user.id
     username = target.from_user.first_name
     is_owner = (user_id == OWNER_ID)
-    
-    if not target.from_user.username:
-        if isinstance(target, CallbackQuery):
-            await target.message.answer(
-                "❌ <b>У вас не установлен username в Telegram!</b>\n\n"
-                "Для использования бота необходимо установить username:\n"
-                "1. Откройте настройки Telegram\n"
-                "2. Перейдите в раздел 'Имя пользователя'\n"
-                "3. Установите уникальный username\n"
-                "4. Перезапустите бота командой /start",
-                parse_mode="HTML"
-            )
-            await target.answer()
-            return
-        elif isinstance(target, Message):
-            await target.answer(
-                "❌ <b>У вас не установлен username в Telegram!</b>\n\n"
-                "Для использования бота необходимо установить username:\n"
-                "1. Откройте настройки Telegram\n"
-                "2. Перейдите в раздел 'Имя пользователя'\n"
-                "3. Установите уникальный username\n"
-                "4. Перезапустите бота командой /start",
-                parse_mode="HTML"
-            )
-            return
+
+    if is_owner:
+        if not target.from_user.username:
+            if isinstance(target, CallbackQuery):
+                await target.message.answer(
+                    "❌ <b>У вас не установлен username в Telegram!</b>\n\n"
+                    "Для использования бота необходимо установить username:\n"
+                    "1. Откройте настройки Telegram\n"
+                    "2. Перейдите в раздел 'Имя пользователя'\n"
+                    "3. Установите уникальный username\n"
+                    "4. Перезапустите бота командой /start",
+                    parse_mode="HTML"
+                )
+                await target.answer()
+                return
+            elif isinstance(target, Message):
+                await target.answer(
+                    "❌ <b>У вас не установлен username в Telegram!</b>\n\n"
+                    "Для использования бота необходимо установить username:\n"
+                    "1. Откройте настройки Telegram\n"
+                    "2. Перейдите в раздел 'Имя пользователя'\n"
+                    "3. Установите уникальный username\n"
+                    "4. Перезапустите бота командой /start",
+                    parse_mode="HTML"
+                )
+                return
     
     text, markup = get_main_menu(user_id, username, is_owner)
     
