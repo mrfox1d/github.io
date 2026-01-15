@@ -10,6 +10,7 @@ import os
 
 OWNER_ID = 7508122402
 BOOSTERS_CHAT_ID = -1003679877605
+ORDERS_CHANNEL_ID = -1003438779782  # Канал для заказов
 ADMIN_IDS = [OWNER_ID, 1806616337]
 BOOSTER_APPLICATIONS_CHAT_ID = ADMIN_IDS
 BOOSTERS_CHAT_LINK = "https://t.me/+roK4alwk6JZiZDdk"
@@ -20,7 +21,7 @@ def init_db():
     cursor = conn.cursor()
     cursor.execute("""PRAGMA foreign_keys = ON""")
     cursor.execute("""CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY, username TEXT, so2_id INTEGER)""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, buyer_id INTEGER, range_now TEXT, range_to_boost TEXT, boost_format TEXT, price TEXT, boost_status TEXT DEFAULT "waiting", booster_id INTEGER)""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, buyer_id INTEGER, game_mode TEXT, range_now TEXT, range_to_boost TEXT, boost_format TEXT, price TEXT, boost_status TEXT DEFAULT "waiting", booster_id INTEGER)""")  # Добавлено game_mode
     cursor.execute("""CREATE TABLE IF NOT EXISTS boosters (id INTEGER PRIMARY KEY, username TEXT, so2_id TEXT, status TEXT DEFAULT "active")""")
     cursor.execute("""CREATE TABLE IF NOT EXISTS booster_applications (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, username TEXT, age INTEGER, main_mmr TEXT, main_id TEXT, twinks_count INTEGER, status TEXT DEFAULT "pending")""")
     cursor.execute("""CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)""")
@@ -66,11 +67,11 @@ def get_user(tg_id):
     conn.close()
     return user
 
-def create_order(buyer_id, range_now, range_to_boost, boost_format):
+def create_order(buyer_id, game_mode, range_now, range_to_boost, boost_format):
     conn = sqlite3.connect("databases.db")
     cursor = conn.cursor()
-    cursor.execute("""INSERT INTO orders (buyer_id, range_now, range_to_boost, boost_format) VALUES (?, ?, ?, ?)""", 
-                   (buyer_id, range_now, range_to_boost, boost_format))
+    cursor.execute("""INSERT INTO orders (buyer_id, game_mode, range_now, range_to_boost, boost_format) VALUES (?, ?, ?, ?, ?)""", 
+                   (buyer_id, game_mode, range_now, range_to_boost, boost_format))
     order_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -172,6 +173,7 @@ class WaitingForID(StatesGroup):
     input = State()
 
 class OrderStates(StatesGroup):
+    game_mode = State()  # Новое состояние для выбора режима игры
     range_now = State()
     range_to_boost = State()
     boost_format = State()
@@ -422,7 +424,42 @@ async def start_order(callback: CallbackQuery, state: FSMContext):
         )
         return
     
-    await callback.message.answer("📝 Введите ваш текущий ранг (например: Silver 3, Gold 1, Phoenix):")
+    # Кнопки для выбора режима игры
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="ММ"), KeyboardButton(text="Союзники")],
+            [KeyboardButton(text="Битва кланов"), KeyboardButton(text="↩️ Отменить заказ")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    
+    await callback.message.answer(
+        "🎮 <b>Выберите режим игры:</b>\n\n"
+        "• <b>ММ</b> — Competitive Matchmaking\n"
+        "• <b>Союзники</b> — Allies\n"
+        "• <b>Битва кланов</b> — Clan Wars\n\n"
+        "Нажмите на кнопку ниже:",
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+    await state.set_state(OrderStates.game_mode)
+
+@dp.message(OrderStates.game_mode)
+async def process_game_mode(message: Message, state: FSMContext):
+    if message.text == "↩️ Отменить заказ":
+        await message.answer("❌ Создание заказа отменено.", reply_markup=ReplyKeyboardRemove())
+        await show_main_menu(message)
+        await state.clear()
+        return
+    
+    game_modes = ["ММ", "Союзники", "Битва кланов"]
+    if message.text not in game_modes:
+        await message.answer("❌ Пожалуйста, выберите режим игры из предложенных кнопок:")
+        return
+    
+    await state.update_data(game_mode=message.text)
+    await message.answer("📝 Введите ваш текущий ранг (например: Silver 3, Gold 1, Phoenix):", reply_markup=ReplyKeyboardRemove())
     await state.set_state(OrderStates.range_now)
 
 @dp.message(OrderStates.range_now)
@@ -480,16 +517,117 @@ async def process_boost_format(message: Message, state: FSMContext):
             return
     
     data = await state.get_data()
-    order_id = create_order(message.from_user.id, data['range_now'], data['range_to_boost'], boost_format)
+    
+    # Создаем заказ с новым полем game_mode
+    order_id = create_order(
+        message.from_user.id, 
+        data['game_mode'],  # Добавлено game_mode
+        data['range_now'], 
+        data['range_to_boost'], 
+        boost_format
+    )
     
     user = get_user(message.from_user.id)
     so2_id = user[2] if user else "не указан"
     
-    boosters = get_active_boosters()
+    # 1. Отправляем заказ в канал (только уведомление, без кнопки принятия)
+    try:
+        await bot.send_message(
+            ORDERS_CHANNEL_ID,
+            f"📦 <b>НОВЫЙ ЗАКАЗ #{order_id}</b>\n\n"
+            f"👤 Клиент: {message.from_user.first_name}\n"
+            f"📝 Юзернейм: @{message.from_user.username}\n"
+            f"🆔 ID: {message.from_user.id}\n"
+            f"🎮 SO2 ID: {so2_id}\n\n"
+            f"📊 <b>Детали заказа:</b>\n"
+            f"• Режим: {data['game_mode']}\n"  # Добавлено
+            f"• Текущий ранг: {data['range_now']}\n"
+            f"• Желаемый ранг: {data['range_to_boost']}\n"
+            f"• Формат: {boost_format}\n\n"
+            f"⏳ <i>Ожидает перенаправления бустерам</i>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Ошибка отправки заказа в канал: {e}")
     
+    # 2. Отправляем админу сообщение с кнопкой для пересылки в чат бустеров
+    forward_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Переслать бустерам", callback_data=f"forward_to_boosters_{order_id}")]
+    ])
+    
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"📦 <b>НОВЫЙ ЗАКАЗ #{order_id}</b>\n\n"
+                f"👤 Клиент: {message.from_user.first_name}\n"
+                f"📝 Юзернейм: @{message.from_user.username}\n"
+                f"🆔 ID: {message.from_user.id}\n"
+                f"🎮 SO2 ID: {so2_id}\n\n"
+                f"📊 <b>Детали заказа:</b>\n"
+                f"• Режим: {data['game_mode']}\n"  # Добавлено
+                f"• Текущий ранг: {data['range_now']}\n"
+                f"• Желаемый ранг: {data['range_to_boost']}\n"
+                f"• Формат: {boost_format}\n\n"
+                f"<b>Нажмите кнопку ниже, чтобы переслать заказ бустерам:</b>",
+                parse_mode="HTML",
+                reply_markup=forward_keyboard
+            )
+        except Exception as e:
+            print(f"Ошибка отправки админу: {e}")
+    
+    await message.answer(
+        f"✅ <b>Ваш заказ №{order_id} успешно принят!</b>\n\n"
+        f"📋 <b>Детали заказа:</b>\n"
+        f"• Режим: {data['game_mode']}\n"  # Добавлено
+        f"• Текущий ранг: {data['range_now']}\n"
+        f"• Желаемый ранг: {data['range_to_boost']}\n"
+        f"• Формат: {boost_format}\n\n"
+        "⏳ <i>Ожидайте, скоро администратор обработает ваш заказ.</i>",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("forward_to_boosters_"))
+async def forward_to_boosters(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔️ У вас нет доступа!")
+        return
+    
+    order_id = int(callback.data.split("_")[3])
+    order = get_order(order_id)
+    
+    if not order:
+        await callback.answer("Заказ не найден!")
+        return
+    
+    # Получаем информацию о пользователе
+    user = get_user(order[1])
+    so2_id = user[2] if user else "не указан"
+    
+    # Получаем username пользователя
+    from sqlite3 import connect
+    conn = connect("databases.db")
+    cursor = conn.cursor()
+    cursor.execute("""SELECT username FROM users WHERE tg_id = ?""", (order[1],))
+    user_data = cursor.fetchone()
+    conn.close()
+    
+    username = user_data[0] if user_data else "не указан"
+    
+    # Клавиатура для бустеров с кнопкой принятия заказа
+    order_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Беру заказ", callback_data=f"take_order_{order_id}")]
+    ])
+    
+    # Отправляем заказ в чат бустеров
     try:
         orders_topic_id = get_setting("orders_topic_id", "1")
         
+        # Упоминаем активных бустеров
+        boosters = get_active_boosters()
         mention_tags = ""
         for booster in boosters:
             mention_tags += f"@{booster[1]} "
@@ -502,57 +640,49 @@ async def process_boost_format(message: Message, state: FSMContext):
                 message_thread_id=int(orders_topic_id) if orders_topic_id != "1" else None
             )
         
-        order_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Беру заказ", callback_data=f"take_order_{order_id}")]
-        ])
-        
         order_message = await bot.send_message(
             BOOSTERS_CHAT_ID,
             f"📦 <b>НОВЫЙ ЗАКАЗ #{order_id}</b>\n\n"
-            f"👤 Клиент: {message.from_user.first_name}\n"
-            f"📝 Юзернейм: @{message.from_user.username}\n"
-            f"🆔 ID: {message.from_user.id}\n"
+            f"👤 Клиент: {username}\n"
+            f"📝 Юзернейм: @{username}\n"
+            f"🆔 ID: {order[1]}\n"
             f"🎮 SO2 ID: {so2_id}\n\n"
             f"📊 <b>Детали заказа:</b>\n"
-            f"• Текущий ранг: {data['range_now']}\n"
-            f"• Желаемый ранг: {data['range_to_boost']}\n"
-            f"• Формат: {boost_format}",
+            f"• Режим: {order[2]}\n"  # game_mode
+            f"• Текущий ранг: {order[3]}\n"  # range_now
+            f"• Желаемый ранг: {order[4]}\n"  # range_to_boost
+            f"• Формат: {order[5]}\n\n"  # boost_format
+            f"💰 <b>Цена:</b> <i>не установлена</i>\n\n"
+            f"<b>Для установки цены нажмите на кнопку ниже:</b>",
             parse_mode="HTML",
             reply_markup=order_keyboard,
             message_thread_id=int(orders_topic_id) if orders_topic_id != "1" else None
         )
         
-    except Exception as e:
-        print(f"Ошибка отправки заказа в группу: {e}")
-        await bot.send_message(
-            OWNER_ID,
-            f"📦 <b>НОВЫЙ ЗАКАЗ #{order_id}</b>\n\n"
-            f"👤 Клиент: {message.from_user.first_name}\n"
-            f"📝 Юзернейм: @{message.from_user.username}\n"
-            f"🆔 ID: {message.from_user.id}\n"
-            f"🎮 SO2 ID: {so2_id}\n\n"
-            f"📊 <b>Детали заказа:</b>\n"
-            f"• Текущий ранг: {data['range_now']}\n"
-            f"• Желаемый ранг: {data['range_to_boost']}\n"
-            f"• Формат: {boost_format}",
+        # Обновляем сообщение админу
+        await callback.message.edit_text(
+            f"{callback.message.text}\n\n"
+            f"✅ <b>Заказ #{order_id} переслан бустерам!</b>\n"
+            f"Бустеры могут взять заказ в чате.",
             parse_mode="HTML"
         )
-    
-    await message.answer(
-        f"✅ <b>Ваш заказ №{order_id} успешно принят!</b>\n\n"
-        f"📋 <b>Детали заказа:</b>\n"
-        f"• Текущий ранг: {data['range_now']}\n"
-        f"• Желаемый ранг: {data['range_to_boost']}\n"
-        f"• Формат: {boost_format}\n\n"
-        "⏳ <i>Ожидайте, скоро бустер свяжется с вами для уточнения деталей.</i>",
-        parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    
-    await state.clear()
+        
+        # Отправляем клиенту уведомление
+        await bot.send_message(
+            order[1],
+            f"📢 <b>Ваш заказ #{order_id} отправлен бустерам!</b>\n\n"
+            f"Скоро с вами свяжется бустер для выполнения заказа.",
+            parse_mode="HTML"
+        )
+        
+        await callback.answer(f"Заказ #{order_id} переслан бустерам!")
+        
+    except Exception as e:
+        print(f"Ошибка отправки заказа в группу: {e}")
+        await callback.answer(f"Ошибка: {e}")
 
 @dp.callback_query(F.data.startswith("take_order_"))
-async def take_order(callback: CallbackQuery):
+async def take_order(callback: CallbackQuery, state: FSMContext):
     if not get_booster(callback.from_user.id):
         await callback.answer("⛔️ Вы не бустер!")
         return
@@ -564,7 +694,7 @@ async def take_order(callback: CallbackQuery):
         await callback.answer("Заказ не найден!")
         return
     
-    if order[8] == "assigned":
+    if order[8] == "assigned":  # boost_status
         await callback.answer("❌ Этот заказ уже взят!")
         return
     
@@ -588,6 +718,8 @@ async def take_order(callback: CallbackQuery):
     )
     
     await callback.answer(f"Вы взяли заказ #{order_id}")
+
+# Остальной код остается без изменений...
 
 @dp.callback_query(F.data == "booster_apply")
 async def start_booster_application(callback: CallbackQuery, state: FSMContext):
@@ -924,6 +1056,7 @@ async def set_price_handler(callback: CallbackQuery, state: FSMContext):
         f"💰 <b>Установите цену для заказа #{order_id}</b>\n\n"
         f"Детали заказа:\n"
         f"• Клиент: ID {order[1]}\n"
+        f"• Режим: {order[2]}\n"  # game_mode
         f"• Текущий ранг: {order[3]}\n"
         f"• Желаемый ранг: {order[4]}\n"
         f"• Формат: {order[5]}\n\n"
@@ -954,6 +1087,7 @@ async def process_owner_price(message: Message, state: FSMContext):
             order[1],
             f"💰 <b>Цена заказа установлена!</b>\n\n"
             f"📋 <b>Детали заказа #{order_id}:</b>\n"
+            f"• Режим: {order[2]}\n"  # game_mode
             f"• Текущий ранг: {order[3]}\n"
             f"• Желаемый ранг: {order[4]}\n"
             f"• Формат: {order[5]}\n"
